@@ -122,3 +122,76 @@ func TestScalerFactoryUsesContextFromCurrentInvocation(t *testing.T) {
 	require.NoError(t, refreshedScaler.Close(refreshCtx))
 	require.NoError(t, builders[0].Scaler.Close(refreshCtx))
 }
+
+func TestBuildScalersResolvesContainerEnvOnlyWhenTriggerReadsIt(t *testing.T) {
+	const namespace = "default"
+
+	testScheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(testScheme))
+	require.NoError(t, kedav1alpha1.AddToScheme(testScheme))
+
+	podTemplateSpec := &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "app",
+			EnvFrom: []corev1.EnvFromSource{{
+				SecretRef: &corev1.SecretEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "created-by-the-workload"},
+				},
+			}},
+		}}},
+	}
+
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		wantErr  bool
+	}{
+		{
+			name: "trigger without FromEnv keys builds while the Secret is missing",
+			metadata: map[string]string{
+				"timezone":        "Etc/UTC",
+				"start":           "0 * * * *",
+				"end":             "30 * * * *",
+				"desiredReplicas": "2",
+			},
+		},
+		{
+			name: "trigger with a FromEnv key still fails while the Secret is missing",
+			metadata: map[string]string{
+				"timezone":               "Etc/UTC",
+				"start":                  "0 * * * *",
+				"end":                    "30 * * * *",
+				"desiredReplicas":        "2",
+				"desiredReplicasFromEnv": "DESIRED_REPLICAS",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := &scaleHandler{
+				client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+				recorder:      events.NewFakeRecorder(10),
+				authClientSet: &authentication.AuthClientSet{},
+			}
+			withTriggers := &kedav1alpha1.WithTriggers{
+				ObjectMeta:   metav1.ObjectMeta{Name: "scaled-object", Namespace: namespace},
+				InternalKind: "ScaledObject",
+				Spec: kedav1alpha1.WithTriggersSpec{Triggers: []kedav1alpha1.ScaleTriggers{{
+					Type:     "cron",
+					Metadata: tt.metadata,
+				}}},
+			}
+
+			builders, err := handler.buildScalers(context.Background(), withTriggers, podTemplateSpec, "", false)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "error resolving secrets for ScaleTarget")
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, builders, 1)
+			require.NoError(t, builders[0].Scaler.Close(context.Background()))
+		})
+	}
+}

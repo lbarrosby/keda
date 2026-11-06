@@ -19,6 +19,7 @@ package scaling
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,7 +47,7 @@ func (h *scaleHandler) buildScalers(ctx context.Context, withTriggers *kedav1alp
 
 		factory := func(factoryCtx context.Context) (scalers.Scaler, *scalersconfig.ScalerConfig, error) {
 			resolvedEnv := make(map[string]string)
-			if podTemplateSpec != nil {
+			if podTemplateSpec != nil && triggerReadsContainerEnv(trigger.Metadata) {
 				var err error
 				resolvedEnv, err = resolver.ResolveContainerEnv(factoryCtx, h.client, logger, &podTemplateSpec.Spec, containerName, withTriggers.Namespace, h.authClientSet.SecretLister)
 				if err != nil {
@@ -117,6 +118,20 @@ func (h *scaleHandler) buildScalers(ctx context.Context, withTriggers *kedav1alp
 	}
 
 	return result, nil
+}
+
+// triggerReadsContainerEnv reports whether the trigger metadata references an
+// environment variable of the scale target container. Scalers only read
+// ResolvedEnv through "<param>FromEnv" style keys (e.g. hostFromEnv,
+// credentialsFromEnvFile), so the container env, and the Secrets and ConfigMaps
+// it points to, only need to be resolved when such a key is present.
+func triggerReadsContainerEnv(metadata map[string]string) bool {
+	for key := range metadata {
+		if strings.Contains(key, "FromEnv") {
+			return true
+		}
+	}
+	return false
 }
 
 // buildScaler builds a scaler form input config and trigger type
