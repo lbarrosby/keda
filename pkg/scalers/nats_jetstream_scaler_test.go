@@ -627,3 +627,56 @@ func TestNATSJetStreamMonitoringNodeURLByNodeEncoding(t *testing.T) {
 	assert.Equal(t, "$G", q.Get("acc"), "acc parameter must be preserved correctly in node-by-node URL")
 	assert.True(t, strings.HasPrefix(parsedURL.Host, "leader."), "node-by-node hostname must be prefixed with node name")
 }
+
+func TestNATSJetStreamNoAccountDetailsHintsAccountID(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		response *jetStreamEndpointResponse
+		wantErr  string
+	}{
+		{
+			name:     "standalone, account name given",
+			metadata: map[string]string{"natsServerMonitoringEndpoint": "localhost:8222", "account": "orders", "stream": "mystream", "consumer": "pull_consumer"},
+			response: &jetStreamEndpointResponse{},
+			wantErr:  `no account details for account "orders"; /jsz looks accounts up by ID, so if "orders" is an account name, set accountID to the account ID instead`,
+		},
+		{
+			name:     "clustered, account name given",
+			metadata: map[string]string{"natsServerMonitoringEndpoint": "localhost:8222", "account": "orders", "stream": "mystream", "consumer": "pull_consumer"},
+			response: &jetStreamEndpointResponse{MetaCluster: metaCluster{ClusterSize: 3}},
+			wantErr:  `no account details for account "orders"; /jsz looks accounts up by ID`,
+		},
+		{
+			name:     "standalone, account ID given",
+			metadata: map[string]string{"natsServerMonitoringEndpoint": "localhost:8222", "accountID": "ACCOUNTID", "stream": "mystream", "consumer": "pull_consumer"},
+			response: &jetStreamEndpointResponse{Accounts: []accountDetail{{ID: "OTHER", Name: "other"}}},
+			wantErr:  `no account details for account ID "ACCOUNTID"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockResponseJSON, err := json.Marshal(tt.response)
+			if err != nil {
+				t.Fatal("Could not marshal mock response:", err)
+			}
+			client, srv := natsMockHTTPJetStreamServer(t, mockResponseJSON)
+			defer srv.Close()
+
+			config := &scalersconfig.ScalerConfig{TriggerMetadata: tt.metadata}
+			meta, err := parseNATSJetStreamMetadata(config)
+			if err != nil {
+				t.Fatal("Could not parse metadata:", err)
+			}
+			s := natsJetStreamScaler{
+				metadata:   meta,
+				httpClient: client,
+				logger:     InitializeLogger(config, "nats_jetstream_scaler"),
+			}
+
+			_, _, err = s.GetMetricsAndActivity(context.Background(), "metric_name")
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}

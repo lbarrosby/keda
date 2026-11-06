@@ -171,6 +171,7 @@ func (s *natsJetStreamScaler) getNATSJetstreamMonitoringData(ctx context.Context
 	}
 
 	consumerFound := s.setNATSJetStreamMonitoringData(jetStreamAccountResp, "")
+	accountFound := s.hasAccount(jetStreamAccountResp)
 
 	// invalidate the cached data if we used it but nothing was found
 	if cachedConsumerLeader != "" && !consumerFound {
@@ -241,6 +242,7 @@ func (s *natsJetStreamScaler) getNATSJetstreamMonitoringData(ctx context.Context
 			if err != nil {
 				return err
 			}
+			accountFound = accountFound || s.hasAccount(jetStreamAccountResp)
 
 			for _, jetStreamAccount := range jetStreamAccountResp.Accounts {
 				if s.metadata.IsAccount(jetStreamAccount) {
@@ -260,9 +262,37 @@ func (s *natsJetStreamScaler) getNATSJetstreamMonitoringData(ctx context.Context
 				}
 			}
 		}
+		if !accountFound {
+			return s.accountNotFoundError()
+		}
 		return fmt.Errorf("leader node not found for consumer %s", s.metadata.Consumer)
 	}
+	if !accountFound {
+		return s.accountNotFoundError()
+	}
 	return nil
+}
+
+func (s *natsJetStreamScaler) hasAccount(jetStreamAccountResp *jetStreamEndpointResponse) bool {
+	if jetStreamAccountResp == nil {
+		return false
+	}
+	for _, jsAccount := range jetStreamAccountResp.Accounts {
+		if s.metadata.IsAccount(jsAccount) {
+			return true
+		}
+	}
+	return false
+}
+
+// accountNotFoundError explains why /jsz returned no details for the configured account.
+// The monitoring endpoint looks up the acc parameter by account ID, so a trigger that only
+// sets the account name gets no account_details back when the name and the ID differ.
+func (s *natsJetStreamScaler) accountNotFoundError() error {
+	if s.metadata.Account != "" && s.metadata.AccountID == s.metadata.Account {
+		return fmt.Errorf("NATS JetStream monitoring endpoint returned no account details for account %q; /jsz looks accounts up by ID, so if %q is an account name, set accountID to the account ID instead", s.metadata.Account, s.metadata.Account)
+	}
+	return fmt.Errorf("NATS JetStream monitoring endpoint returned no account details for account ID %q", s.metadata.AccountID)
 }
 
 func (s *natsJetStreamScaler) setNATSJetStreamMonitoringData(jetStreamAccountResp *jetStreamEndpointResponse, leaderURL string) bool {
